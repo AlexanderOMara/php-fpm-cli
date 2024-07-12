@@ -9,14 +9,22 @@ jobs:
     strategy:
       matrix:
         config:
+          - php-fpm: php:5.6.40-fpm-alpine3.8
           - php-fpm: php:7.0.7-fpm-alpine
           - php-fpm: php:7.1.0-fpm-alpine
+          - php-fpm: php:7.1.33-fpm-alpine3.9
           - php-fpm: php:7.2.0-fpm-alpine3.6
+          - php-fpm: php:7.2.34-fpm-alpine3.11
           - php-fpm: php:7.3.0-fpm-alpine3.8
+          - php-fpm: php:7.3.33-fpm-alpine3.13
           - php-fpm: php:7.4.0-fpm-alpine3.10
+          - php-fpm: php:7.4.33-fpm-alpine3.15
           - php-fpm: php:8.0.0-fpm-alpine3.12
+          - php-fpm: php:8.0.30-fpm-alpine3.16
           - php-fpm: php:8.1.0-fpm-alpine3.14
+          - php-fpm: php:8.1.29-fpm-alpine3.19
           - php-fpm: php:8.2.0-fpm-alpine3.16
+          - php-fpm: php:8.2.21-fpm-alpine3.19
           - php-fpm: php:8.3.0-fpm-alpine3.17
           - php-fpm: php:8.3.9-fpm-alpine3.20
 
