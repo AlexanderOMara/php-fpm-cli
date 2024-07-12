@@ -3,7 +3,7 @@
 /**
  * php-fpm-cli - Run PHP scripts through FastCGI from the command line.
  *
- * @version 0.0.0
+ * @version 1.0.0
  * @author Alexander O'Mara
  * @copyright 2024 Alexander O'Mara
  * @license MPL 2.0
@@ -17,7 +17,7 @@ function_exists('error_reporting') and @error_reporting(-1);
  * Command line interface.
  */
 class Cli {
-	const VERSION = '0.0.0';
+	const VERSION = '1.0.0';
 
 	/**
 	 * Usage examples.
