@@ -30,6 +30,7 @@ jobs:
           - php-fpm: php:8.2.21-fpm-alpine3.19
           - php-fpm: php:8.3.0-fpm-alpine3.17
           - php-fpm: php:8.3.9-fpm-alpine3.20
+          - php-fpm: php:8.4.0alpha1-fpm-alpine3.20
 
     runs-on: ubuntu-latest
 
