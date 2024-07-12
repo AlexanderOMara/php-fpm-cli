@@ -1,0 +1,881 @@
+#!/usr/bin/env php
+<?php
+/**
+ * php-fpm-cli - Run PHP scripts through FastCGI from the command line.
+ *
+ * @version 0.0.0
+ * @author Alexander O'Mara
+ * @copyright 2024 Alexander O'Mara
+ * @license MPL 2.0
+ */
+PHP_SAPI === 'cli' or exit;
+function_exists('ini_set') and @ini_set('display_errors', 1);
+function_exists('ini_set') and @ini_set('display_startup_errors', 1);
+function_exists('error_reporting') and @error_reporting(-1);
+
+/**
+ * Command line interface.
+ */
+class Cli {
+	const VERSION = '0.0.0';
+
+	/**
+	 * Usage examples.
+	 *
+	 * @return array List of argument examples.
+	 */
+	private static function usages() {
+		return array(
+			'-c <socket> [options] [script]',
+		);
+	}
+
+	/**
+	 * CLI options.
+	 *
+	 * @return array List of CLI options.
+	 */
+	private static function options() {
+		return array(
+			array(
+				array('-c', '--connect'),
+				null,
+				'<socket>',
+				'Connect to <socket> file or host:port'
+			),
+			array(
+				array('-p', '--param'),
+				array(),
+				'<key>=<value>',
+				'FCGI request <key>=<value> param'
+			),
+			array(
+				array('-b', '--body'),
+				null,
+				'<body>',
+				'FCGI request STDIN <body>'
+			),
+			array(
+				array('-d', '--data'),
+				null,
+				'<file>',
+				'FCGI request STDIN body from <file>'
+			),
+			array(
+				array('-i', '--include'),
+				false,
+				'',
+				'FCGI response headers included in output'
+			),
+			array(
+				array('-t', '--timeout'),
+				null,
+				'<duration>',
+				'Connect timeout in milliseconds'
+			),
+			array(
+				array('-h', '--help'),
+				false,
+				'',
+				'Display help and exit'
+			),
+			array(
+				array('-v', '--version'),
+				false,
+				'',
+				'Display version and exit'
+			),
+		);
+	}
+
+	/**
+	 * Generate help.
+	 *
+	 * @param array $argv Command line arguments.
+	 * @return string Command line help.
+	 */
+	private static function help($argv) {
+		$arg0 = $argv ? $argv[0] : '';
+		$prog = basename($arg0 !== '' ? $arg0 : __FILE__);
+		return Util::formatHelp(self::usages(), self::options(), $prog);
+	}
+
+	/**
+	 * Open data or body for FCGI STDIN.
+	 *
+	 * @param string|null $data File path.
+	 * @param string|null $body File data.
+	 * @param int $size Size of stdin data.
+	 * @return mixed|string|null File stream handle, data, or null.
+	 * @throws Exception
+	 */
+	private static function openStdin($data, $body, &$size) {
+		if ($data === '-') {
+			// Need the size, so must read all stdin.
+			$contents = @stream_get_contents(STDIN);
+			if ($contents === false) {
+				throw new Exception('Failed to read from stdin');
+			}
+
+			$size = strlen($contents);
+			return $contents;
+		}
+
+		if ($data !== null) {
+			$fp = @fopen($data, 'r');
+			if (!$fp) {
+				throw new Exception("Failed to open file: $data");
+			}
+
+			// If seekable, stat to get size.
+			$meta = stream_get_meta_data($fp);
+			if ($meta['seekable']) {
+				$stat = @fstat($fp);
+				if (!$stat) {
+					fclose($fp);
+					throw new Exception("Failed to stat file: $data");
+				}
+
+				$size = $stat['size'];
+				return $fp;
+			}
+
+			// Cannot seek, must read all for the size.
+			$contents = @stream_get_contents($fp);
+			fclose($fp);
+			if ($contents === false) {
+				throw new Exception("Failed to read from file: $data");
+			}
+
+			$size = strlen($contents);
+			return $contents;
+		}
+
+		if ($body !== null) {
+			$size = strlen($body);
+			return $body;
+		}
+
+		return null;
+	}
+
+	/**
+	 * Add default FCGI params.
+	 *
+	 * @param array $params FCGI params.
+	 * @param string|null $script Script path.
+	 * @param mixed|string|null $stdin FCGI stdin.
+	 * @param int|null $size Content length.
+	 * @return void
+	 */
+	private static function defaultParams(&$params, $script, $stdin, $size) {
+		// Unless manual request, setup default params.
+		if ($script === null) {
+			return;
+		}
+
+		$params['SCRIPT_FILENAME'] = $script;
+
+		if (!isset($params['REQUEST_METHOD'])) {
+			$params['REQUEST_METHOD'] = $stdin !== null ? 'POST' : 'GET';
+		}
+
+		if ($size !== null && !isset($params['CONTENT_LENGTH'])) {
+			$params['CONTENT_LENGTH'] = $size;
+		}
+	}
+
+	/**
+	 * CLI main entry point.
+	 *
+	 * @param array $argv Command line arguments.
+	 * @return int Exit code.
+	 */
+	public static function main($argv) {
+		$exception = null;
+		$socket = null;
+		$stdin = null;
+		$status = 0;
+
+		try {
+			$badOpt = Util::argparse(self::options(), $argv, $options, $args);
+			if ($badOpt !== null) {
+				throw new Exception("Invalid option: $badOpt");
+			}
+
+			if ($options['-h']) {
+				fprintf(STDOUT, "%s\n", self::help($argv));
+				return 0;
+			}
+
+			if ($options['-v']) {
+				fprintf(STDOUT, "%s\n", self::VERSION);
+				return 0;
+			}
+
+			$connect = $options['-c'];
+			if ($connect === null) {
+				if (count($argv) <= 1) {
+					fprintf(STDERR, "%s\n", self::help($argv));
+					return 1;
+				}
+				throw new Exception('Required option: -c');
+			}
+
+			$timeout = $options['-t'];
+			if ($timeout !== null) {
+				if (!ctype_digit($timeout)) {
+					throw new Exception('Invalid option: -t');
+				}
+				$timeout = (int)$timeout;
+			}
+
+			$body = $options['-b'];
+			$data = $options['-d'];
+			if ($body !== null && $data !== null) {
+				throw new Exception('Invalid options: -b and -d');
+			}
+
+			$script = null;
+			if ($args) {
+				if (isset($args[1])) {
+					throw new Exception('Too many arguments');
+				}
+
+				$script0 = $args[0];
+				$script = @realpath($script0);
+				if ($script === false || !is_file($script)) {
+					throw new Exception("Invalid script file: $script0");
+				}
+			}
+
+			$include = $options['-i'];
+			$params = Util::envparse($options['-p']);
+			$stdinSize = null;
+			$stdin = self::openStdin($data, $body, $stdinSize);
+			self::defaultParams($params, $script, $stdin, $stdinSize);
+
+			$socket = Util::connect($connect, $timeout);
+			$request = new FcgiRequest($socket, 1);
+			$request->params = $params;
+			$request->contentLength = $stdinSize;
+			$request->stdin = $stdin;
+			$request->stdout = STDOUT;
+			$request->stderr = STDERR;
+			$request->headers = $include;
+			$status = $request->send();
+		}
+		catch (Exception $e) {
+			$exception = $e;
+		}
+		catch (Error $e) {
+			$exception = $e;
+		}
+
+		if ($exception) {
+			fprintf(STDERR, "ERROR: %s\n", $e->getMessage());
+		}
+		if ($socket) {
+			fclose($socket);
+		}
+		if ($stdin !== null && !is_string($stdin)) {
+			fclose($stdin);
+		}
+		return ($exception || $status > 299 || $status < 200) ? 1 : 0;
+	}
+}
+
+/**
+ * FCGI request protocol implementation.
+ */
+class FcgiRequest {
+	const VERSION_1 = 1;
+
+	const BEGIN_REQUEST = 1;
+	const END_REQUEST = 3;
+	const PARAMS = 4;
+	const STDIN = 5;
+	const STDOUT = 6;
+	const STDERR = 7;
+
+	const RESPONDER = 1;
+
+	/**
+	 * Stream resource.
+	 *
+	 * @var mixed
+	 */
+	private $stream;
+
+	/**
+	 * Request ID.
+	 *
+	 * @var int
+	 */
+	private $request;
+
+	/**
+	 * Request parameters.
+	 *
+	 * @var array
+	 */
+	public $params = array();
+
+	/**
+	 * Content length to read from stdin.
+	 *
+	 * @var int|null
+	 */
+	public $contentLength = null;
+
+	/**
+	 * Input stream for stdin.
+	 *
+	 * @var mixed|string|null
+	 */
+	public $stdin = null;
+
+	/**
+	 * Output stream for stdout.
+	 *
+	 * @var mixed|null
+	 */
+	public $stdout = null;
+
+	/**
+	 * Output stream for stderr.
+	 *
+	 * @var mixed|null
+	 */
+	public $stderr = null;
+
+	/**
+	 * Include headers in stdout.
+	 *
+	 * @var bool
+	 */
+	public $headers = false;
+
+	/**
+	 * FCGI request.
+	 *
+	 * @param mixed $stream Stream resource.
+	 * @param int $request Request ID.
+	 */
+	public function __construct($stream, $request) {
+		$this->stream = $stream;
+		$this->request = $request;
+	}
+
+	/**
+	 * Send the FCGI request and get response code.
+	 *
+	 * @return int The HTTP status code.
+	 * @throws Exception
+	 */
+	public function send() {
+		$write = '';
+		$this->sendBeginRequest($write);
+		$this->sendParams($write);
+		$this->sendStdin($write);
+		return $this->readResponse();
+	}
+
+	/**
+	 * Send the BEGIN_REQUEST record.
+	 *
+	 * @param string $buffer Record buffer.
+	 * @return void
+	 */
+	private function sendBeginRequest(&$buffer) {
+		$flags = 0;
+		$buffer = $this->encodeRecord(
+			self::BEGIN_REQUEST,
+			(
+				chr(self::RESPONDER >> 8) .
+				chr(self::RESPONDER & 0xFF) .
+				chr($flags) .
+				"\0\0\0\0\0"
+			)
+		);
+	}
+
+	/**
+	 * Send the PARAMS records.
+	 *
+	 * @param string $buffer Record buffer.
+	 * @return void
+	 */
+	private function sendParams(&$buffer) {
+		$params = $this->params;
+		if ($params) {
+			$pdata = self::encodeNameValuePairs($params);
+			foreach (str_split($pdata, 0xFFFF) as $chk) {
+				$buffer .= $this->encodeRecord(self::PARAMS, $chk);
+			}
+		}
+		$buffer .= $this->encodeRecord(self::PARAMS, '');
+	}
+
+	/**
+	 * Send the STDIN records.
+	 *
+	 * @param string $buffer Record buffer.
+	 * @return void
+	 * @throws Exception
+	 */
+	private function sendStdin(&$buffer) {
+		$remaining = $this->contentLength;
+		$stdin = $this->stdin;
+		if ($remaining) {
+			$isString = is_string($stdin);
+			for ($i = 0;;) {
+				$size = min($remaining, 0xFFFF);
+				$chk = $isString
+					? substr($stdin, $i, $size)
+					: @stream_get_contents($stdin, $size);
+				if ($chk === null || strlen($chk) !== $size) {
+					throw new Exception('Failed to read FCGI STDIN');
+				}
+
+				$buffer .= $this->encodeRecord(self::STDIN, $chk);
+
+				$remaining -= $size;
+				if (!$remaining) {
+					break;
+				}
+
+				$this->writeRecords($buffer);
+				$buffer = '';
+
+				$i += $size;
+			}
+		}
+		$buffer .= $this->encodeRecord(self::PARAMS, '');
+		$this->writeRecords($buffer);
+		$buffer = '';
+	}
+
+	/**
+	 * Read FCGI response records.
+	 *
+	 * @return int The HTTP status code.
+	 * @throws Exception
+	 */
+	private function readResponse() {
+		$head = '';
+		$rnrn = false;
+		$status = null;
+		while (true) {
+			$this->readRecord($type, $reqId, $content);
+
+			// Should never happen, but not fatal.
+			if ($reqId !== $this->request) {
+				continue;
+			}
+
+			switch ($type) {
+				case self::STDOUT: {
+					// Capture headers to get status code.
+					if ($rnrn === false) {
+						$head .= $content;
+						$rnrn = strpos($head, "\r\n\r\n");
+						if ($rnrn !== false) {
+							$status = self::getStatus(substr($head, 0, $rnrn));
+							if (!$this->headers) {
+								// Skip over headers to the body.
+								$content = substr($head, $rnrn + 4);
+							}
+							unset($head);
+						}
+						elseif (!$this->headers) {
+							// Skip headers.
+							break;
+						}
+					}
+
+					if ($content !== '') {
+						$wrote = @fwrite($this->stdout, $content);
+						if ($wrote !== strlen($content)) {
+							throw new Exception('Failed to write FCGI STDOUT');
+						}
+					}
+					break;
+				}
+				case self::STDERR: {
+					if ($content !== '') {
+						$wrote = @fwrite($this->stderr, $content);
+						if ($wrote !== strlen($content)) {
+							throw new Exception('Failed to write FCGI STDERR');
+						}
+					}
+					break;
+				}
+				case self::END_REQUEST: {
+					return $status !== null ? (int)$status : 200;
+				}
+			}
+		}
+	}
+
+	/**
+	 * Encode an FCGI record of a given type with the given content.
+	 *
+	 * @param int $type Record type.
+	 * @param string $content Record content, this can be empty.
+	 * @return string Binary data.
+	 */
+	private function encodeRecord($type, $content) {
+		$request = $this->request;
+		$contentLength = strlen($content);
+		$over = $contentLength % 8;
+		$paddingLength = $over ? 8 - $over : 0;
+		return (
+			chr(self::VERSION_1) .
+			chr($type) .
+			chr(($request >> 8) & 0xFF) .
+			chr($request & 0xFF) .
+			chr($contentLength >> 8) .
+			chr($contentLength & 0xFF) .
+			chr($paddingLength) .
+			"\0" .
+			$content .
+			str_repeat("\0", $paddingLength)
+		);
+	}
+
+	/**
+	 * Read an FCGI record.
+	 *
+	 * @param int $type Record type.
+	 * @param int $request Request ID.
+	 * @param string $content Record content.
+	 * @return void
+	 * @throws Exception
+	 */
+	private function readRecord(&$type, &$request, &$content) {
+		$head = @stream_get_contents($this->stream, 8);
+		if ($head === null || strlen($head) !== 8) {
+			throw new Exception('Failed to read FCGI record header');
+		}
+
+		$version = ord($head[0]);
+		if ($version !== self::VERSION_1) {
+			throw new Exception("Unexpected FCGI version: $version");
+		}
+
+		$type = ord($head[1]);
+		$request = (ord($head[2]) << 8) | ord($head[3]);
+		$contentLength = (ord($head[4]) << 8) | ord($head[5]);
+		$paddingLength = ord($head[6]);
+
+		$size = $contentLength + $paddingLength;
+		$content = '';
+		if ($size) {
+			$body = @stream_get_contents($this->stream, $size);
+			if ($body === null || strlen($body) !== $size) {
+				throw new Exception('Failed to read FCGI record body');
+			}
+
+			if ($contentLength) {
+				$content = substr($body, 0, $contentLength);
+			}
+		}
+	}
+
+	/**
+	 * Write FCGI records.
+	 *
+	 * @param string $data Byte data.
+	 * @return void
+	 * @throws Exception
+	 */
+	private function writeRecords($data) {
+		$wrote = @fwrite($this->stream, $data);
+		if ($wrote !== strlen($data)) {
+			throw new Exception('Failed to write FCGI records');
+		}
+	}
+
+	/**
+	 * Encode name-value-pair for use in FCGI_PARAMS records.
+	 *
+	 * @param string $name Param name.
+	 * @param string $value Param value.
+	 * @return string Binary data.
+	 */
+	private static function encodeNameValuePair($name, $value) {
+		$r = '';
+		foreach (array($name, $value) as $str) {
+			$length = strlen($str);
+			$r .= ($length >> 7)
+				? (
+					chr((($length >> 24) & 0xFF) | 0x80) .
+					chr(($length >> 16) & 0xFF) .
+					chr(($length >> 8) & 0xFF) .
+					chr($length & 0xFF)
+				)
+				: chr($length);
+		}
+		$r .= $name;
+		$r .= $value;
+		return $r;
+	}
+
+	/**
+	 * Encode name-value-pairs for use in FCGI_PARAMS records.
+	 *
+	 * @param array $pairs Name-value pairs.
+	 * @return string Binary data.
+	 */
+	private static function encodeNameValuePairs($pairs) {
+		$r = '';
+		foreach ($pairs as $name => $value) {
+			$r .= self::encodeNameValuePair($name, $value);
+		}
+		return $r;
+	}
+
+	/**
+	 * Get status from headers.
+	 *
+	 * @param string $headers HTTP headers.
+	 * @return string|null Status code string or null if not found.
+	 */
+	private static function getStatus($headers) {
+		foreach (explode("\r\n", $headers) as $line) {
+			$parts = explode(': ', $line, 2);
+			if ($parts[0] === 'Status' && isset($parts[1])) {
+				$parts = explode(' ', $parts[1], 2);
+				return $parts[0];
+			}
+		}
+		return null;
+	}
+}
+
+/**
+ * Utility functions.
+ */
+class Util {
+	/**
+	 * Parse a socket address, which may be a path to a unix socket file.
+	 *
+	 * @param string $address The address.
+	 * @param int $port The port.
+	 * @return string The host.
+	 */
+	public static function parseSocketAddress($address, &$port) {
+		$col = strpos($address, '://');
+		if ($col === false) {
+			if (strpos($address, '/') !== false) {
+				$port = -1;
+				return "unix://$address";
+			}
+		}
+		else {
+			$protocol = substr($address, 0, $col);
+			if ($protocol === 'unix' || $protocol === 'file') {
+				$port = -1;
+				return $address;
+			}
+		}
+
+		$col = strrpos($address, ':');
+		if ($col !== false) {
+			$after = substr($address, $col + 1);
+			if (ctype_digit($after)) {
+				$port = (int)$after;
+				return substr($address, 0, $col);
+			}
+		}
+
+		$port = -1;
+		return $address;
+	}
+
+	/**
+	 * Connect socket to address.
+	 *
+	 * @param string $address Connect address.
+	 * @param int|null $timeout Connect timeout in milliseconds.
+	 * @return mixed Socket resource.
+	 * @throws Exception
+	 */
+	public static function connect($address, $timeout) {
+		$host = self::parseSocketAddress($address, $port);
+		$socket = $timeout !== null
+			? @fsockopen($host, $port, $errno, $errstr, $timeout / 1000)
+			: @fsockopen($host, $port, $errno, $errstr);
+		if (!$socket) {
+			$errstr = $errno ? "$errno: $errstr" : 'Unknown error';
+			throw new Exception("Failed to connect to: $address ($errstr)");
+		}
+		return $socket;
+	}
+
+	/**
+	 * Parse a list of name=value strings into an associative array.
+	 *
+	 * @param array $envs List of name=value strings.
+	 * @return array Associative array of names and values.
+	 */
+	public static function envparse($envs) {
+		$r = array();
+		foreach ($envs as $env) {
+			$kv = explode('=', $env, 2);
+			if (isset($kv[1])) {
+				$r[$kv[0]] = $kv[1];
+			}
+		}
+		return $r;
+	}
+
+	/**
+	 * Parse command line arguments.
+	 *
+	 * @param array $spec Command line arguments specification.
+	 * @param array $argv Command line arguments.
+	 * @param array $options Parsed options, aliases share value memory.
+	 * @param array $args Positional arguments.
+	 * @return string|null The first invalid option or null.
+	 */
+	public static function argparse($spec, $argv, &$options, &$args) {
+		$args = array();
+		$options = array();
+		$aliases = array();
+		foreach ($spec as $info) {
+			$names = $info[0];
+			foreach ($names as $i => $key) {
+				if ($i === 0) {
+					$options[$key] = $info[1];
+				}
+				else {
+					$aliases[$key] = $names[0];
+				}
+			}
+		}
+
+		$end = false;
+		$option = null;
+		foreach ($argv as $i => $arg) {
+			if ($i === 0) {
+				continue;
+			}
+
+			if ($end) {
+				$args[] = $arg;
+				continue;
+			}
+
+			if ($option !== null) {
+				if (is_array($options[$option])) {
+					$options[$option][] = $arg;
+				}
+				else {
+					$options[$option] = $arg;
+				}
+				$option = null;
+				continue;
+			}
+
+			if (isset($arg[1]) && $arg[0] === '-') {
+				if ($arg === '--') {
+					$end = true;
+					continue;
+				}
+
+				$e = strpos($arg, '=');
+				if ($e) {
+					$val = substr($arg, $e + 1);
+					$arg = substr($arg, 0, $e);
+					if (isset($aliases[$arg])) {
+						$arg = $aliases[$arg];
+					}
+					if (array_key_exists($arg, $options)) {
+						$prev = $options[$arg];
+						if (!is_bool($prev) && !is_int($prev)) {
+							if (is_array($options[$arg])) {
+								$options[$arg][] = $val;
+							}
+							else {
+								$options[$arg] = $val;
+							}
+							continue;
+						}
+					}
+				}
+				else {
+					if (isset($aliases[$arg])) {
+						$arg = $aliases[$arg];
+					}
+					if (array_key_exists($arg, $options)) {
+						$prev = $options[$arg];
+						if (is_bool($prev)) {
+							$options[$arg] = true;
+						}
+						elseif (is_int($prev)) {
+							$options[$arg]++;
+						}
+						else {
+							$option = $arg;
+						}
+						continue;
+					}
+				}
+
+				return $arg;
+			}
+
+			$args[] = $arg;
+		}
+
+		return $option;
+	}
+
+	/**
+	 * Format command line help.
+	 *
+	 * @param array $usage Usage examples.
+	 * @param array $spec Command line arguments specification.
+	 * @param string $prog Program name.
+	 * @return string Formatted help.
+	 */
+	public static function formatHelp($usage, $spec, $prog) {
+		$options = array();
+		$pad = 0;
+		foreach ($spec as $info) {
+			$desc = $info[3];
+			if ($desc === '') {
+				continue;
+			}
+
+			$option = implode(', ', $info[0]);
+			$placeholder = $info[2];
+			if ($placeholder !== '') {
+				$option .= " $placeholder";
+			}
+
+			$pad = max($pad, strlen($option));
+			$options[] = array($option, $desc);
+		}
+
+		$lines = array();
+		foreach ($usage as $i => $u) {
+			$pre = $i ? '      ' : 'Usage:';
+			$lines[] = "$pre $prog $u";
+		}
+		$lines[] = '';
+
+		foreach ($options as $option) {
+			$flags = str_pad($option[0], $pad, ' ');
+			$desc = $option[1];
+			$lines[] = "  $flags  $desc";
+		}
+		$lines[] = '';
+
+		return implode("\n", $lines);
+	}
+}
+
+exit(Cli::main($argv));
