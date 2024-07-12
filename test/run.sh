@@ -44,7 +44,7 @@ coproc docker run --rm \
 	--mount "type=bind,source=${source},destination=${destination},readonly" \
 	--mount "type=bind,source=${conf},destination=${confd}" \
 	"${image}" 2>&1
-trap "docker stop '"${service}"' > /dev/null || true" SIGINT SIGTERM EXIT
+trap "docker stop '${service}' > /dev/null || true" SIGINT SIGTERM EXIT
 server_stdout="${COPROC[0]}"
 
 started=0
