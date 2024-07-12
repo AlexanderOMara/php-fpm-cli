@@ -134,7 +134,7 @@ GET /path/to/script.php
 
 # Compatibility
 
-Designed to be backwards compatible back from PHP 5.0.0.
+Designed to be backwards compatible from PHP 5.0.0 onward.
 
 Compatibility with PHP versions before 5.5.36 is not guaranteed for lack of compatible docker images to test with.
 
