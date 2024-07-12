@@ -23,9 +23,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test
-        run: apt-cache showpkg docker-engine
-
       - name: Checkout
         uses: actions/checkout@v4
 
