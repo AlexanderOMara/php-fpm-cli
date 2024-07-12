@@ -2,6 +2,8 @@
 
 Run PHP scripts through FastCGI from the command line
 
+[![Build Status](https://github.com/AlexanderOMara/php-fpm-cli/workflows/main/badge.svg)](https://github.com/AlexanderOMara/php-fpm-cli/actions?query=workflow%3Amain+branch%3Amaster)
+
 # Overview
 
 A PHP CLI script to run PHP scripts through a php-fpm worker that is also a pure-PHP FastCGI request CLI.
