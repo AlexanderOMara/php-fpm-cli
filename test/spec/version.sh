@@ -15,7 +15,7 @@ if [[ "${output_short}" != "${output_long}" ]]; then
 fi
 
 status=0
-grep '^\d*\.\d*\.\d*' > /dev/null <<< "${output_short}" || status=$?
+grep '^[0-9]*\.[0-9]*\.[0-9]*' > /dev/null <<< "${output_short}" || status=$?
 if [[ "${status}" != 0 ]]; then
 	echo 'ERROR: Version invalid'
 	echo "OUTPUT: ${output_short}"
