@@ -130,6 +130,14 @@ $ php-fpm-cli -c /var/run/php-fpm.sock -p 'SCRIPT_FILENAME=/path/to/script.php' 
 GET /path/to/script.php
 ```
 
+# Compatibility
+
+Designed to be backwards compatible back through PHP 5.0.0.
+
+Compatibility with PHP versions before 5.5.36 is not guaranteed for lack of compatible docker images to test with.
+
+If you have compatiability issues, bug reports and patches are welcome!
+
 # License
 
 Copyright (c) 2024 Alexander O'Mara
