@@ -9,6 +9,9 @@ jobs:
     strategy:
       matrix:
         config:
+          - php-fpm: php:5.5.36-fpm-alpine
+          - php-fpm: php:5.5.38-fpm-alpine
+          - php-fpm: php:5.6.22-fpm-alpine
           - php-fpm: php:5.6.40-fpm-alpine3.8
           - php-fpm: php:7.0.7-fpm-alpine
           - php-fpm: php:7.1.0-fpm-alpine
